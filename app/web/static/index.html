@@ -326,9 +326,13 @@
       return `${s}s`;
     }
 
+    const _BASE = (() => { const p = location.pathname; return p.endsWith('/') ? p : p.slice(0, p.lastIndexOf('/') + 1); })();
     async function api(path, options = {}) {
-      const response = await fetch(path, options);
-      const payload = await response.json();
+      const url = path.startsWith('/') ? _BASE + path.slice(1) : path;
+      const response = await fetch(url, options);
+      let payload;
+      try { payload = await response.json(); }
+      catch { throw new Error(`请求失败 ${response.status}（响应内容非 JSON）`); }
       if (!response.ok || !payload.ok) throw new Error(payload.error || `请求失败 ${response.status}`);
       return payload.data;
     }
