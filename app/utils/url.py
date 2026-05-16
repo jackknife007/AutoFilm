@@ -44,7 +44,7 @@ class URLUtils:
             try:
                 port = int(port_str)
             except ValueError:
-                port = -1  # 端口号解析失败，设为 0
+                port = -1  # 端口号解析失败，设为 -1
         else:
             domain = netloc
             if scheme == "http":
@@ -52,6 +52,6 @@ class URLUtils:
             elif scheme == "https":
                 port = 443
             else:
-                port = -1  # 未知协议，端口号设为 0
+                port = -1  # 未知协议，端口号设为 -1
 
         return scheme, domain, port

@@ -1,7 +1,7 @@
 from typing import Final
 from datetime import datetime
 
-from feedparser import parse  # type:ignore
+from feedparser import parse  # type: ignore
 
 from app.core import logger
 from app.utils import RequestUtils, URLUtils
@@ -166,8 +166,9 @@ class Ani2Alist:
             """
             logger.debug(f"请求地址：{_url}")
             _resp = await RequestUtils.post(_url)
-            if _resp.status_code != 200:
-                raise Exception(f"请求发送失败，状态码：{_resp.status_code}")
+            if _resp is None or _resp.status_code != 200:
+                status_code = _resp.status_code if _resp else "无响应"
+                raise RuntimeError(f"请求发送失败，状态码：{status_code}")
 
             _result = _resp.json()
 
@@ -244,15 +245,13 @@ class Ani2Alist:
             return int(float(number) * units[unit])
 
         resp = await RequestUtils.get(f"https://{self.__rss_domain}/ani-download.xml")
-        if resp.status_code != 200:
-            raise Exception(f"请求发送失败，状态码：{resp.status_code}")
+        if resp is None or resp.status_code != 200:
+            status_code = resp.status_code if resp else "无响应"
+            raise RuntimeError(f"请求发送失败，状态码：{status_code}")
         feeds = parse(resp.text)
 
         for entry in feeds.entries:
             """
-            print(type(entry))
-            print(entry)
-
             type: <class 'feedparser.util.FeedParserDict'>
             {
                 "title": "[ANi] FAIRY TAIL 魔導少年 百年任務 - 18 [1080P][Baha][WEB-DL][AAC AVC][CHT].mp4",

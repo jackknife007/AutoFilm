@@ -1,13 +1,18 @@
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from logging.handlers import TimedRotatingFileHandler
 from datetime import datetime
 from pathlib import Path
+from re import sub
 
 import click
 
 from app.core.config import settings
 
 FMT = "%(prefix)s %(message)s"
+TASK_ID: ContextVar[str] = ContextVar("TASK_ID", default="")
+TASK_NAME: ContextVar[str] = ContextVar("TASK_NAME", default="")
 
 # 日志级别颜色映射
 LEVEL_WITH_COLOR = {
@@ -82,6 +87,39 @@ class TRFileHandler(TimedRotatingFileHandler):
         return (self.log_dir / f"{current_date}.log").as_posix()
 
 
+def get_task_log_path(task_id: str, date_str: str | None = None) -> Path:
+    safe_task_id = sub(r'[/\\:*?"<>|\x00]+', "_", task_id).strip("_") or "task"
+    if date_str is None:
+        date_str = datetime.now().strftime("%Y-%m-%d")
+    return settings.LOG_DIR / "tasks" / safe_task_id / f"{date_str}.log"
+
+
+class _NoTaskFilter(logging.Filter):
+    """总日志过滤器：任务上下文内的日志不写入总日志文件。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not TASK_ID.get()
+
+
+class TaskFileHandler(logging.Handler):
+    """
+    根据当前任务上下文写入单独任务日志。
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        task_id = TASK_ID.get()
+        if not task_id:
+            return
+        try:
+            log_path = get_task_log_path(task_id)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            message = self.format(record)
+            with log_path.open("a", encoding="utf-8") as file:
+                file.write(message + "\n")
+        except Exception:
+            self.handleError(record)
+
+
 class LoggerManager:
     """
     日志管理器
@@ -94,6 +132,7 @@ class LoggerManager:
 
         self.__logger = logging.getLogger(settings.APP_NAME)
         self.__logger.setLevel(logging.DEBUG)
+        self.__logger.propagate = False
 
         console_formatter = CustomFormatter(
             file_formatter=False,
@@ -114,7 +153,29 @@ class LoggerManager:
         file_handler = TRFileHandler(log_dir=settings.LOG_DIR, encoding="utf-8")
         file_handler.setLevel(level)
         file_handler.setFormatter(file_formatter)
+        file_handler.addFilter(_NoTaskFilter())
         self.__logger.addHandler(file_handler)
+
+        task_file_handler = TaskFileHandler()
+        task_file_handler.setLevel(level)
+        task_file_handler.setFormatter(file_formatter)
+        self.__logger.addHandler(task_file_handler)
+
+    @contextmanager
+    def task_context(self, task_id: str, task_name: str = ""):
+        """
+        为当前任务设置日志上下文。
+        """
+        task_id_token = TASK_ID.set(task_id)
+        task_name_token = TASK_NAME.set(task_name or task_id)
+        try:
+            yield
+        finally:
+            TASK_ID.reset(task_id_token)
+            TASK_NAME.reset(task_name_token)
+
+    def get_task_log_path(self, task_id: str, date_str: str | None = None) -> Path:
+        return get_task_log_path(task_id, date_str)
 
     def __log(self, method: str, msg: str, *args, **kwargs) -> None:
         """

@@ -1,4 +1,4 @@
-from asyncio import sleep
+from asyncio import Queue, create_task, sleep
 from typing import Callable, AsyncGenerator
 from time import time
 
@@ -46,14 +46,12 @@ class AlistClient(metaclass=Multiton):
             url = "https://" + url
         self.url = url.rstrip("/")
 
+        self.__username = str(username)
+        self.___password = str(password)
+
         if token != "":
             self.__token["token"] = token
             self.__token["expires"] = -1
-        elif username != "" and password != "":
-            self.__username = str(username)
-            self.___password = str(password)
-        else:
-            raise ValueError("用户名及密码为空或令牌 Token 为空")
 
         self.sync_api_me()
 
@@ -76,7 +74,14 @@ class AlistClient(metaclass=Multiton):
             headers = kwargs.get("headers", {})
             headers["Authorization"] = self.__get_token
             kwargs["headers"] = headers
-        return await self.__client.request(method, url, **kwargs, sync=False)
+        resp = await self.__client.request(method, url, **kwargs, sync=False)
+        return self.__ensure_response(resp, f"{method.upper()} {url}")
+
+    @staticmethod
+    def __ensure_response(resp: Response | None, action: str) -> Response:
+        if resp is None:
+            raise RuntimeError(f"{action} 请求失败：无响应")
+        return resp
 
     async def __get(self, url: str, auth: bool = True, **kwargs) -> Response:
         """
@@ -144,6 +149,7 @@ class AlistClient(metaclass=Multiton):
 
         json = {"username": self.username, "password": self.__password}
         resp = self.__client.post(self.url + "/api/auth/login", json=json, sync=True)
+        resp = self.__ensure_response(resp, "更新令牌")
         if resp.status_code != 200:
             raise RuntimeError(f"更新令牌请求发送失败，状态码：{resp.status_code}")
 
@@ -163,6 +169,7 @@ class AlistClient(metaclass=Multiton):
 
         headers = {"Authorization": self.__get_token}
         resp = self.__client.get(self.url + "/api/me", headers=headers, sync=True)
+        resp = self.__ensure_response(resp, "获取用户信息")
 
         if resp.status_code != 200:
             raise RuntimeError(f"获取用户信息请求发送失败，状态码：{resp.status_code}")
@@ -361,6 +368,7 @@ class AlistClient(metaclass=Multiton):
         wait_time: float | int,
         is_detail: bool = True,
         filter: Callable[[AlistPath], bool] = lambda x: True,
+        max_workers: int = 10,
     ) -> AsyncGenerator[AlistPath, None]:
         """
         异步路径列表生成器
@@ -370,25 +378,53 @@ class AlistClient(metaclass=Multiton):
         :param wait_time: 每轮遍历等待时间（单位秒）,
         :param is_detail：是否获取详细信息（raw_url）
         :param filter: 匿名函数过滤器（默认不启用）
+        :param max_workers: 最大并发数
         :return: AlistPath 对象生成器
         """
+        max_workers = max(1, int(max_workers))
+        dir_queue: Queue[str] = Queue()
+        result_queue: Queue[AlistPath | Exception | None] = Queue()
+        await dir_queue.put(dir_path)
 
-        for path in await self.async_api_fs_list(dir_path):
-            await sleep(wait_time)
-            if path.is_dir:
-                async for child_path in self.iter_path(
-                    dir_path=path.full_path,
-                    wait_time=wait_time,
-                    is_detail=is_detail,
-                    filter=filter,
-                ):
-                    yield child_path
+        async def scan_worker() -> None:
+            while True:
+                current_dir = await dir_queue.get()
+                try:
+                    if wait_time > 0:
+                        await sleep(wait_time)
+                    for path in await self.async_api_fs_list(current_dir):
+                        if path.is_dir:
+                            await dir_queue.put(path.full_path)
 
-            if filter(path):
-                if is_detail:
-                    yield await self.async_api_fs_get(path.full_path)
-                else:
-                    yield path
+                        if filter(path):
+                            if is_detail:
+                                if wait_time > 0:
+                                    await sleep(wait_time)
+                                path = await self.async_api_fs_get(path.full_path)
+                            await result_queue.put(path)
+                except Exception as e:
+                    await result_queue.put(e)
+                finally:
+                    dir_queue.task_done()
+
+        async def wait_until_done() -> None:
+            await dir_queue.join()
+            await result_queue.put(None)
+
+        workers = [create_task(scan_worker()) for _ in range(max_workers)]
+        done_task = create_task(wait_until_done())
+        try:
+            while True:
+                result = await result_queue.get()
+                if result is None:
+                    break
+                if isinstance(result, Exception):
+                    raise result
+                yield result
+        finally:
+            done_task.cancel()
+            for worker in workers:
+                worker.cancel()
 
     async def get_storage_by_mount_path(
         self, mount_path: str, create: bool = False, **kwargs

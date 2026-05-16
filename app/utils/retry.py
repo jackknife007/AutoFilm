@@ -49,7 +49,7 @@ class Retry(metaclass=Singleton):
                         return func(*args, **kwargs)
                     except exception as e:
                         remaining_retries -= 1
-                        if remaining_retries >= 0:
+                        if remaining_retries > 0:
                             _delay = (tries - remaining_retries) * backoff * delay
                             logger.warning(cls.WARNING_MSG.format(e, _delay))
                             sleep(_delay)
@@ -89,7 +89,7 @@ class Retry(metaclass=Singleton):
                         return await func(*args, **kwargs)
                     except exception as e:
                         remaining_retries -= 1
-                        if remaining_retries >= 0:
+                        if remaining_retries > 0:
                             _delay = (tries - remaining_retries) * backoff * delay
                             logger.warning(cls.WARNING_MSG.format(e, _delay))
                             await async_sleep(_delay)

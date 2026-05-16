@@ -1,11 +1,15 @@
 Settings:
   DEV: False                          # 开发者模式(可选，默认 False)
 
+WebUI:
+  enabled: False                       # 是否开启 Web 管理端（可选，默认 False）
+  host: 0.0.0.0                        # Web 管理端监听地址（可选，默认 0.0.0.0）
+  port: 7899                           # Web 管理端端口（可选，默认 7899）
+
 Alist2StrmList:
   - id: 动漫                                # 标识 ID
     cron: 0 20 * * *                        # 后台定时任务 Cron 表达式
     url: http://alist:5244                  # Alist 服务器地址
-    public_url: https://alist.akimio.top    # 公共访问地址，用于 AlistURL 模式生成 .strm 文件内容（可选，默认使用 url）
     username: admin                         # Alist 用户名
     password: adminadmin                    # Alist 密码
     token: alist-d22d23ddf42fvv2            # Alist Token 永久令牌（可选，使用永久令牌则无需设置账号密码）

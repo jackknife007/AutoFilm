@@ -247,6 +247,8 @@ class HTTPClient:
         :param kwargs: 其他请求参数，如 headers, cookies 等
         """
         resp = await self.head(url, sync=False, params=params, **kwargs)
+        if resp is None:
+            raise RuntimeError(f"HEAD 请求失败，超出最大重试次数：{url}")
 
         file_size = int(resp.headers.get("Content-Length", -1))
 
@@ -257,6 +259,8 @@ class HTTPClient:
                 logger.debug(f"{file_path.name} 文件大小未知，直接下载")
                 await self.__download_chunk(url, temp_file, 0, 0, **kwargs)
             else:
+                with temp_file.open("wb") as file:
+                    file.truncate(file_size)
                 async with TaskGroup() as tg:
                     logger.debug(
                         f"开始分片下载文件：{file_path.name}，分片数:{chunk_num}"
@@ -291,13 +295,16 @@ class HTTPClient:
 
         await to_thread(makedirs, file_path.parent, exist_ok=True)
 
-        if start != 0 and end != 0:
-            headers = kwargs.get("headers", {})
+        if end > 0:
+            headers = dict(kwargs.get("headers", {}))
             headers["Range"] = f"bytes={start}-{end}"
             kwargs["headers"] = headers
 
         resp = await self.get(url, sync=False, **kwargs)
-        async with async_open(file_path, "ab") as file:
+        if resp is None:
+            raise RuntimeError(f"GET 请求失败，超出最大重试次数：{url}")
+        mode = "r+b" if file_path.exists() else "wb"
+        async with async_open(file_path, mode) as file:
             file.seek(start)
             async for chunk in resp.aiter_bytes(iter_chunked_size):
                 await file.write(chunk)
@@ -338,7 +345,7 @@ class RequestUtils:
     支持同步和异步请求
     """
 
-    __client = HTTPClient
+    __client: HTTPClient | None = None
 
     @classmethod
     def get_client(cls, *_, **__) -> HTTPClient:
@@ -348,7 +355,9 @@ class RequestUtils:
         :param url: 请求的 URL
         :return: HTTP 客户端
         """
-        return cls.client
+        if cls.__client is None:
+            cls.__client = HTTPClient()
+        return cls.__client
 
     @overload
     @classmethod

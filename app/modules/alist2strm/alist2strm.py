@@ -12,6 +12,7 @@ from app.extensions import VIDEO_EXTS, SUBTITLE_EXTS, IMAGE_EXTS, NFO_EXTS
 from app.modules.alist import AlistClient, AlistPath
 from app.modules.alist2strm.mode import Alist2StrmMode
 
+
 class Alist2Strm:
     def __init__(
         self,
@@ -65,7 +66,7 @@ class Alist2Strm:
 
         self.client = AlistClient(url, username, password, token)
         self.mode = Alist2StrmMode.from_str(mode)
-        
+
         if public_url and not public_url.startswith("http"):
             public_url = "https://" + public_url
         self.public_url = public_url.rstrip("/") if public_url else None
@@ -92,6 +93,7 @@ class Alist2Strm:
 
         self.overwrite = overwrite
         self.__max_workers = Semaphore(max_workers)
+        self.__max_workers_count = max_workers
         self.__max_downloaders = Semaphore(max_downloaders)
         self.wait_time = wait_time
         self.sync_server = sync_server
@@ -100,11 +102,12 @@ class Alist2Strm:
             self.sync_ignore_pattern = re_compile(sync_ignore)
         else:
             self.sync_ignore_pattern = None
-        
-        if smart_protection and smart_protection.get('enabled', False):
+
+        if smart_protection and smart_protection.get("enabled", False):
             from app.modules.alist2strm.strm_protection import StrmProtectionManager
-            threshold = smart_protection.get('threshold', 100)
-            grace_scans = smart_protection.get('grace_scans', 3)
+
+            threshold = smart_protection.get("threshold", 100)
+            grace_scans = smart_protection.get("grace_scans", 3)
             self.strm_protection = StrmProtectionManager(
                 self.target_dir, id, threshold, grace_scans
             )
@@ -116,9 +119,11 @@ class Alist2Strm:
         """
         处理主体
         """
-        
+
         # BDMV 处理相关变量初始化
-        self.bdmv_collections: dict[str, list[tuple[AlistPath, int]]] = {}  # BDMV目录 -> [(文件路径, 文件大小)]
+        self.bdmv_collections: dict[str, list[tuple[AlistPath, int]]] = (
+            {}
+        )  # BDMV目录 -> [(文件路径, 文件大小)]
         self.bdmv_largest_files: dict[str, AlistPath] = {}  # BDMV目录 -> 最大文件路径
 
         def filter(path: AlistPath) -> bool:
@@ -131,19 +136,23 @@ class Alist2Strm:
             """
 
             if path.is_dir:
+                logger.info(f"扫描目录: {path.full_path}")
                 return False
 
             # 跳过系统文件夹和不需要的文件
-            if any(folder in path.full_path for folder in ["@eaDir", "Thumbs.db", ".DS_Store"]):
+            if any(
+                folder in path.full_path
+                for folder in ["@eaDir", "Thumbs.db", ".DS_Store"]
+            ):
                 return False
 
             # 完全跳过 BDMV 文件夹内的所有文件（除了我们特殊处理的 .m2ts 文件）
             if "/BDMV/" in path.full_path and not self._is_bdmv_file(path):
-                logger.debug(f"跳过 BDMV 文件夹内的文件: {path.name}")
+                logger.info(f"跳过 BDMV 内部文件: {path.full_path}")
                 return False
 
             if path.suffix.lower() not in self.process_file_exts:
-                logger.debug(f"文件 {path.name} 不在处理列表中")
+                logger.info(f"跳过 (后缀不处理): {path.full_path}")
                 return False
 
             # 检查是否为 BDMV 文件
@@ -164,22 +173,15 @@ class Alist2Strm:
                 if path.suffix in self.download_exts:
                     local_path_stat = local_path.stat()
                     if local_path_stat.st_mtime < path.modified_timestamp:
-                        logger.debug(
-                            f"文件 {local_path.name} 已过期，需要重新处理 {path.full_path}"
-                        )
+                        logger.info(f"文件已过期，重新处理: {path.full_path}")
                         return True
                     if local_path_stat.st_size < path.size:
-                        logger.debug(
-                            f"文件 {local_path.name} 大小不一致，可能是本地文件损坏，需要重新处理 {path.full_path}"
-                        )
+                        logger.info(f"文件大小不一致，重新处理: {path.full_path}")
                         return True
-                logger.debug(
-                    f"文件 {local_path.name} 已存在，跳过处理 {path.full_path}"
-                )
+                logger.info(f"跳过 (已存在): {path.full_path}")
                 return False
 
             return True
-
 
         if self.mode == Alist2StrmMode.RawURL:
             is_detail = True
@@ -189,45 +191,50 @@ class Alist2Strm:
         self.processed_local_paths = set()  # 云盘文件对应的本地文件路径
 
         # 第一阶段：收集所有文件信息并直接处理普通文件
-        async with self.__max_workers, TaskGroup() as tg:
+        async with TaskGroup() as tg:
             async for path in self.client.iter_path(
                 dir_path=self.source_dir,
                 wait_time=self.wait_time,
                 is_detail=is_detail,
                 filter=filter,
+                max_workers=self.__max_workers_count,
             ):
                 # 直接处理普通文件，不需要额外的 list
                 tg.create_task(self.__file_processer(path))
 
         # 完成 BDMV 文件收集，确定最大文件
         self._finalize_bdmv_collections()
-        
+
         # 第二阶段：处理 BDMV 最大文件
         logger.info(f"开始处理 {len(self.bdmv_largest_files)} 个 BDMV 目录")
         for bdmv_root, largest_file in self.bdmv_largest_files.items():
             try:
                 logger.info(f"处理 BDMV 目录: {bdmv_root}")
                 logger.info(f"最大文件: {largest_file.full_path}")
-                
+
                 # 重新获取详细信息以确保有 raw_url
                 if self.mode == Alist2StrmMode.RawURL and not largest_file.raw_url:
-                    logger.debug(f"重新获取 BDMV 文件详细信息: {largest_file.full_path}")
+                    logger.debug(
+                        f"重新获取 BDMV 文件详细信息: {largest_file.full_path}"
+                    )
                     try:
-                        updated_path = await self.client.async_api_fs_get(largest_file.full_path)
+                        updated_path = await self.client.async_api_fs_get(
+                            largest_file.full_path
+                        )
                         # 保持原有的 full_path，只更新其他属性
                         original_full_path = largest_file.full_path
                         largest_file = updated_path
                         largest_file.full_path = original_full_path
                     except Exception as e:
                         logger.warning(f"重新获取 BDMV 文件详细信息失败: {e}")
-                
+
                 # 处理文件
                 await self.__file_processer(largest_file)
-                
+
                 # 添加到已处理路径列表
                 local_path = self.__get_local_path(largest_file)
                 self.processed_local_paths.add(local_path)
-                
+
                 logger.info(f"BDMV 文件处理完成: {largest_file.name}")
             except Exception as e:
                 logger.error(f"处理 BDMV 文件 {largest_file.full_path} 时出错：{e}")
@@ -245,8 +252,14 @@ class Alist2Strm:
 
         :param path: AlistPath 对象
         """
+        async with self.__max_workers:
+            await self.__do_file_processer(path)
+
+    async def __do_file_processer(self, path: AlistPath) -> None:
         local_path = self.__get_local_path(path)
-        logger.debug(f"__file_processer: 处理文件 {path.full_path} -> 本地路径 {local_path} | 模式 {self.mode}")
+        logger.debug(
+            f"__file_processer: 处理文件 {path.full_path} -> 本地路径 {local_path} | 模式 {self.mode}"
+        )
 
         # 统一的 URL 生成逻辑，BDMV 文件与普通文件使用相同的逻辑
         if self.mode == Alist2StrmMode.AlistURL:
@@ -258,6 +271,9 @@ class Alist2Strm:
             content = path.raw_url
         elif self.mode == Alist2StrmMode.AlistPath:
             content = path.full_path
+        else:
+            logger.error(f"未知模式：{self.mode}，跳过文件 {path.full_path}")
+            return
 
         logger.debug(f"__file_processer: 初始 content = {content}")
 
@@ -271,11 +287,19 @@ class Alist2Strm:
         if local_path.suffix == ".strm":
             async with async_open(local_path, mode="w", encoding="utf-8") as file:
                 await file.write(content)
-            logger.info(f"{local_path.name} 创建成功")
+            try:
+                display = local_path.relative_to(self.target_dir)
+            except ValueError:
+                display = local_path
+            logger.info(f"创建: {display}")
         else:
             async with self.__max_downloaders:
                 await RequestUtils.download(path.download_url, local_path)
-                logger.info(f"{local_path.name} 下载成功")
+            try:
+                display = local_path.relative_to(self.target_dir)
+            except ValueError:
+                display = local_path
+            logger.info(f"下载: {display}")
 
     def __get_local_path(self, path: AlistPath) -> Path:
         """
@@ -290,7 +314,7 @@ class Alist2Strm:
             if bdmv_root and self._should_process_bdmv_file(path):
                 # 为 BDMV 文件生成特殊路径
                 movie_title = self._get_movie_title_from_bdmv_path(bdmv_root)
-                
+
                 if self.flatten_mode:
                     local_path = self.target_dir / f"{movie_title}.strm"
                 else:
@@ -298,10 +322,10 @@ class Alist2Strm:
                     relative_path = bdmv_root.replace(self.source_dir, "", 1)
                     if relative_path.startswith("/"):
                         relative_path = relative_path[1:]
-                    
+
                     # 将 .strm 文件放在电影根目录下，使用电影标题命名
                     local_path = self.target_dir / relative_path / f"{movie_title}.strm"
-                
+
                 return local_path
 
         # 原有逻辑保持不变
@@ -333,23 +357,25 @@ class Alist2Strm:
         files_to_delete = set(all_local_files) - self.processed_local_paths
         strm_present = None
         if self.strm_protection:
-            strm_present = {f for f in self.processed_local_paths if f.suffix == '.strm'}
-        
+            strm_present = {
+                f for f in self.processed_local_paths if f.suffix == ".strm"
+            }
+
         if not files_to_delete:
             if self.strm_protection:
                 self.strm_protection.process(set(), strm_present)
                 self.strm_protection.save()
             return
-        
-        strm_to_delete = {f for f in files_to_delete if f.suffix == '.strm'}
+
+        strm_to_delete = {f for f in files_to_delete if f.suffix == ".strm"}
         other_files = files_to_delete - strm_to_delete
-        
+
         if self.strm_protection:
             strm_to_delete = self.strm_protection.process(strm_to_delete, strm_present)
             self.strm_protection.save()
-        
+
         files_to_delete = strm_to_delete | other_files
-        
+
         for file_path in files_to_delete:
             # 检查文件是否匹配忽略正则表达式
             if self.sync_ignore_pattern and self.sync_ignore_pattern.search(
@@ -378,7 +404,7 @@ class Alist2Strm:
     def _is_bdmv_file(self, path: AlistPath) -> bool:
         """
         检查文件是否为 BDMV 结构中的 .m2ts 文件
-        
+
         :param path: AlistPath 对象
         :return: 是否为 BDMV 文件
         """
@@ -387,7 +413,7 @@ class Alist2Strm:
     def _get_bdmv_root_dir(self, path: AlistPath) -> str:
         """
         获取 BDMV 文件的根目录路径
-        
+
         :param path: BDMV 中的文件路径
         :return: BDMV 根目录路径
         """
@@ -400,7 +426,7 @@ class Alist2Strm:
     def _get_movie_title_from_bdmv_path(self, bdmv_root: str) -> str:
         """
         从 BDMV 根目录路径提取电影标题
-        
+
         :param bdmv_root: BDMV 根目录路径
         :return: 电影标题
         """
@@ -410,7 +436,7 @@ class Alist2Strm:
     def _collect_bdmv_file(self, path: AlistPath) -> None:
         """
         收集 BDMV 文件信息
-        
+
         :param path: BDMV 中的 .m2ts 文件路径
         """
         bdmv_root = self._get_bdmv_root_dir(path)
@@ -434,25 +460,29 @@ class Alist2Strm:
 
             movie_title = self._get_movie_title_from_bdmv_path(bdmv_root)
             logger.info(f"BDMV 目录 '{movie_title}' 中发现 {len(files)} 个 .m2ts 文件:")
-            
+
             # 按大小排序并显示所有文件
             sorted_files = sorted(files, key=lambda x: x[1], reverse=True)
             for i, (file_path, file_size) in enumerate(sorted_files):
                 size_mb = file_size / (1024 * 1024)
                 status = "✓ 选中" if i == 0 else "  跳过"
-                logger.info(f"  {status} {file_path.name}: {size_mb:.1f} MB ({file_size} 字节)")
+                logger.info(
+                    f"  {status} {file_path.name}: {size_mb:.1f} MB ({file_size} 字节)"
+                )
 
             # 找出最大的文件
             largest_file = max(files, key=lambda x: x[1])
             self.bdmv_largest_files[bdmv_root] = largest_file[0]
-            
+
             largest_size_mb = largest_file[1] / (1024 * 1024)
-            logger.info(f"BDMV 目录 '{movie_title}' 最终选择: {largest_file[0].name} ({largest_size_mb:.1f} MB)")
+            logger.info(
+                f"BDMV 目录 '{movie_title}' 最终选择: {largest_file[0].name} ({largest_size_mb:.1f} MB)"
+            )
 
     def _should_process_bdmv_file(self, path: AlistPath) -> bool:
         """
         检查 BDMV 文件是否应该被处理（即是否为最大文件）
-        
+
         :param path: BDMV 中的 .m2ts 文件路径
         :return: 是否应该处理
         """
@@ -462,4 +492,3 @@ class Alist2Strm:
 
         largest_file = self.bdmv_largest_files.get(bdmv_root)
         return largest_file is not None and largest_file.full_path == path.full_path
-

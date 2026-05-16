@@ -30,22 +30,30 @@ class SettingManager:
         """
         创建目录
         """
-        with self.CONFIG_DIR as dir_path:
-            if not dir_path.exists():
-                dir_path.mkdir(parents=True, exist_ok=True)
+        config_dir = self.CONFIG_DIR
+        if not config_dir.exists():
+            config_dir.mkdir(parents=True, exist_ok=True)
 
-        with self.LOG_DIR as dir_path:
-            if not dir_path.exists():
-                dir_path.mkdir(parents=True, exist_ok=True)
+        log_dir = self.LOG_DIR
+        if not log_dir.exists():
+            log_dir.mkdir(parents=True, exist_ok=True)
 
     def __load_mode(self) -> None:
         """
         加载模式
         """
-        with self.CONFIG.open(mode="r", encoding="utf-8") as file:
-            is_dev = safe_load(file).get("Settings", {}).get("DEV", False)
+        is_dev = self.__load_config().get("Settings", {}).get("DEV", False)
 
         self.DEBUG = is_dev
+
+    def __load_config(self) -> dict[str, Any]:
+        """
+        加载配置文件
+        """
+        if not self.CONFIG.exists():
+            return {}
+        with self.CONFIG.open(mode="r", encoding="utf-8") as file:
+            return safe_load(file) or {}
 
     @property
     def BASE_DIR(self) -> Path:
@@ -87,21 +95,23 @@ class SettingManager:
 
     @property
     def AlistServerList(self) -> list[dict[str, Any]]:
-        with self.CONFIG.open(mode="r", encoding="utf-8") as file:
-            alist_server_list = safe_load(file).get("Alist2StrmList", [])
+        alist_server_list = self.__load_config().get("Alist2StrmList", [])
         return alist_server_list
 
     @property
     def Ani2AlistList(self) -> list[dict[str, Any]]:
-        with self.CONFIG.open(mode="r", encoding="utf-8") as file:
-            ani2alist_list = safe_load(file).get("Ani2AlistList", [])
+        ani2alist_list = self.__load_config().get("Ani2AlistList", [])
         return ani2alist_list
 
     @property
     def LibraryPosterList(self) -> list[dict[str, Any]]:
-        with self.CONFIG.open(mode="r", encoding="utf-8") as file:
-            library_poster_list = safe_load(file).get("LibraryPosterList", [])
+        library_poster_list = self.__load_config().get("LibraryPosterList", [])
         return library_poster_list
+
+    @property
+    def WebUI(self) -> dict[str, Any]:
+        web_ui = self.__load_config().get("WebUI", {})
+        return web_ui or {}
 
 
 settings = SettingManager()
